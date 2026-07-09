@@ -191,6 +191,11 @@ class DixonColesModel:
 
         lam = np.exp(attack_home - defence_away + p['home_adv'])
         mu  = np.exp(attack_away - defence_home)
+        
+        # ── Guard 1: clip expected goals to sensible range ─────────────
+        # Prevents exp() exploding to inf
+        lam = np.clip(lam, 1e-6, 15.0)
+        mu  = np.clip(mu,  1e-6, 15.0)
 
         hg  = data['FTHG'].values.astype(int)
         ag  = data['FTAG'].values.astype(int)
@@ -198,6 +203,10 @@ class DixonColesModel:
         # ── Vectorised Poisson log probabilities ───────────────────
         log_p_home = poisson.logpmf(hg, lam)
         log_p_away = poisson.logpmf(ag, mu)
+    
+        # ── Guard 2: clip log probs to prevent -inf ────────────────────
+        log_p_home = np.clip(log_p_home, -20, 0)
+        log_p_away = np.clip(log_p_away, -20, 0)
 
         # ── Vectorised tau correction ──────────────────────────────
         # Compute tau for every match simultaneously
@@ -277,12 +286,22 @@ class DixonColesModel:
         # (keeps log likelihood on same scale regardless of xi)
         weights = weights / weights.sum() * len(weights)
 
+        # ── Add bounds ─────────────────────────────────────────────────
+        # Prevents optimiser wandering into numerical nonsense
+        attack_bounds  = [(-3.0, 3.0)] * n    # attack params
+        defence_bounds = [(-3.0, 3.0)] * n    # defence params
+        home_bounds    = [(0.0,  1.0)]        # home advantage
+        rho_bounds     = [(-1.0, 0.0)]        # rho (always negative)
+
+        bounds = attack_bounds + defence_bounds + home_bounds + rho_bounds
+
         # ── Optimisation ───────────────────────────────────────────
         result = minimize(
             fun     = self._neg_log_likelihood,
             x0      = x0,
             args    = (data, weights),
             method  = 'L-BFGS-B',   # efficient for many parameters
+            bounds  = bounds, 
             options = {'maxiter': 1000, 'ftol': 1e-10}
         )
 
