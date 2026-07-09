@@ -11,6 +11,8 @@ ROOT_DIR = Path(__file__).parent   # folder where config.py lives
 
 # ── Seasons ────────────────────────────────────────────────────────
 SEASONS = {
+    '2021-22': 'https://www.football-data.co.uk/mmz4281/2122/E0.csv',
+    '2022-23': 'https://www.football-data.co.uk/mmz4281/2223/E0.csv',
     '2023-24': 'https://www.football-data.co.uk/mmz4281/2324/E0.csv',
     '2024-25': 'https://www.football-data.co.uk/mmz4281/2425/E0.csv',
     '2025-26': 'https://www.football-data.co.uk/mmz4281/2526/E0.csv',
