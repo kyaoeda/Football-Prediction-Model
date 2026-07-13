@@ -35,7 +35,7 @@ if __name__ == '__main__':
     # ── Backtest ───────────────────────────────────────────────────
     bt      = Backtester(
         xi            = DIXON_COLES_XI,
-        min_train     = 4*380,
+        min_train     = 2*380,
         retrain_every = 10
     )
     results = bt.run(df)
