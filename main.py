@@ -4,7 +4,8 @@ import pandas as pd
 from models.dixon_coles         import DixonColesModel
 from evaluation.backtester      import Backtester
 from evaluation.bookmaker       import BookmakerComparison
-from config import SEASONS, DIXON_COLES_XI
+from betting.strategy           import BettingStrategy
+from config import SEASONS, DIXON_COLES_XI, DIXON_COLES_MAX_GOALS, BANK, STAKE, MIN_EDGE, MAX_EDGE, MIN_ODDS, MAX_ODDS
 
 
 def load_seasons(seasons: dict) -> pd.DataFrame:
@@ -28,11 +29,15 @@ def load_seasons(seasons: dict) -> pd.DataFrame:
 
 if __name__ == '__main__':
 
-    # ── Load data ──────────────────────────────────────────────────
+    # ── Load ───────────────────────────────────────────────────────
     df = load_seasons(SEASONS)
 
     # ── Backtest ───────────────────────────────────────────────────
-    bt      = Backtester(xi=DIXON_COLES_XI, min_train=380*4, retrain_every=10)
+    bt      = Backtester(
+        xi            = DIXON_COLES_XI,
+        min_train     = 4*380,
+        retrain_every = 10
+    )
     results = bt.run(df)
     bt.summary(results)
 
@@ -40,18 +45,35 @@ if __name__ == '__main__':
     bk       = BookmakerComparison(margin_method='basic')
     bk_probs = bk.extract_odds(df)
     merged   = bk.merge_with_results(results, bk_probs)
-
-    # Full report
     bk.full_report(merged)
 
-    # Visualisation
-    bk.plot(merged)
+    # ── Betting simulation ─────────────────────────────────────────
+    print("\nRunning betting simulation...\n")
 
-    # Where does model disagree most with bookmaker?
-    disagree = bk.disagreement(merged, threshold=0.07)
-    print(f"\nTop 10 biggest disagreements:")
-    print(disagree[[
-        'date', 'home_team', 'away_team',
-        'home_win', 'bk_home',
-        'diff_home', 'outcome'
-    ]].head(10).to_string())
+    # Try all three staking methods
+    for method in ['flat', 'kelly', 'edge']:
+        print(f"\n{'─' * 55}")
+        strategy = BettingStrategy(
+            bank     = BANK,
+            stake    = STAKE,
+            min_edge = MIN_EDGE,
+            max_edge = MAX_EDGE,
+            method   = method
+        )
+        bets = strategy.find_value_bets(merged)
+        strategy.summary(bets)
+
+    # ── Plot best method ───────────────────────────────────────────
+    strategy = BettingStrategy(
+        bank     = BANK,
+        stake    = STAKE,
+        min_edge = MIN_EDGE,
+        max_edge = MAX_EDGE,
+        method   = 'flat'
+    )
+    bets = strategy.find_value_bets(merged)
+    strategy.plot(bets)
+
+    # ── Save bets ──────────────────────────────────────────────────
+    bets.to_csv('outputs/bets.csv', index=False)
+    print("\nBets saved to outputs/bets.csv")

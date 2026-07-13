@@ -19,5 +19,13 @@ SEASONS = {
 }
 
 # ── Dixon-Coles Parameters ─────────────────────────────────────────
-DIXON_COLES_XI        = 0.002  # time decay rate
+DIXON_COLES_XI        = 0.00325  # time decay rate
 DIXON_COLES_MAX_GOALS = 10        # max goals in scoreline matrix
+
+# ── Betting Parameters ─────────────────────────────────────────────
+BANK                  = 1000.0   # starting bankroll
+STAKE                 = 10.0     # flat stake per bet
+MIN_EDGE              = 0.05     # minimum edge to place bet (5%)
+MAX_EDGE              = 0.15     # maximum edge to place bet (15%)
+MIN_ODDS              = 1.50     # ignore very short odds
+MAX_ODDS              = 4.0     # ignore very long odds (too noisy)
