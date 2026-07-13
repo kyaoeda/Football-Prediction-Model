@@ -19,5 +19,5 @@ SEASONS = {
 }
 
 # ── Dixon-Coles Parameters ─────────────────────────────────────────
-DIXON_COLES_XI        = 0.00325   # time decay rate
+DIXON_COLES_XI        = 0.002  # time decay rate
 DIXON_COLES_MAX_GOALS = 10        # max goals in scoreline matrix
