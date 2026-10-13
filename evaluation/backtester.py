@@ -13,7 +13,12 @@ import pandas as pd
 import numpy as np
 from sklearn.metrics import log_loss
 from models.dixon_coles import DixonColesModel
-from config import DIXON_COLES_XI, DIXON_COLES_MAX_GOALS
+from config import (
+    DIXON_COLES_XI,
+    DIXON_COLES_MAX_GOALS,
+    PROMOTED_RATING_METHOD,
+    PROMOTED_N_WEAKEST,
+)
 
 
 class Backtester:
@@ -33,6 +38,14 @@ class Backtester:
                           1   = most accurate, very slow
                           10  = good balance ✅
                           38  = retrain once per matchweek
+    handle_promoted : bool — if True, a team appearing for the first time
+                          (i.e. promoted into the division) is seeded with a
+                          prior rating so its match is predicted rather than
+                          skipped. If False, such matches are skipped (old
+                          behaviour).
+    promoted_method : str — prior method passed to the model
+                          ('weakest' | 'average' | 'percentile')
+    n_weakest       : int — teams averaged when promoted_method='weakest'
 
     Example
     -------
@@ -42,13 +55,21 @@ class Backtester:
     """
 
     def __init__(self,
-                 xi            : float = DIXON_COLES_XI,
-                 min_train     : int   = 380,
-                 retrain_every : int   = 10):
+                 xi              : float = DIXON_COLES_XI,
+                 min_train       : int   = 380,
+                 retrain_every   : int   = 10,
+                 handle_promoted : bool  = True,
+                 promoted_method : str   = PROMOTED_RATING_METHOD,
+                 n_weakest       : int   = PROMOTED_N_WEAKEST,
+                 totals_line     : float = 2.5):
 
-        self.xi            = xi
-        self.min_train     = min_train
-        self.retrain_every = retrain_every
+        self.xi              = xi
+        self.min_train       = min_train
+        self.retrain_every   = retrain_every
+        self.handle_promoted = handle_promoted
+        self.promoted_method = promoted_method
+        self.n_weakest       = n_weakest
+        self.totals_line     = totals_line
 
     # ── Private Helpers ───────────────────────────────────────────
 
@@ -113,6 +134,10 @@ class Backtester:
         n      = len(data)
         results = []
 
+        promoted_seen    = set()   # promoted teams given a prior rating
+        promoted_matches = 0       # matches predicted via a prior
+        skipped_matches  = 0       # matches skipped (promoted handling off)
+
         print(f"Backtesting {n - self.min_train} matches...")
         print(f"Training window starts at: {self.min_train} matches")
         print(f"Retraining every: {self.retrain_every} matches\n")
@@ -140,21 +165,43 @@ class Backtester:
                 # Progress update every 100 matches
                 if (i - self.min_train) % 100 == 0:
                     pct = (i - self.min_train) / (n - self.min_train) * 100
-                    print(f"  Progress: {pct:.0f}% — match {i}/{n}")
+                    print(f"  Progress: {pct:.0f}% - match {i}/{n}")
 
             # ── Predict next match ─────────────────────────────────
             row       = data.iloc[i]
             home_team = row['HomeTeam']
             away_team = row['AwayTeam']
 
-            # Skip if either team wasn't in training data
-            # (can happen with promoted/relegated teams)
-            if (home_team not in model.teams_ or
-                away_team  not in model.teams_):
-                continue
+            # Handle teams absent from the training data — i.e. teams
+            # promoted into the division that have no prior matches.
+            unseen = [t for t in (home_team, away_team)
+                      if t not in model.team_to_idx_]
+
+            if unseen:
+                if not self.handle_promoted:
+                    # Old behaviour: skip the match entirely.
+                    skipped_matches += 1
+                    continue
+
+                # Seed each promoted team with a prior rating so we can
+                # still predict. On the next retrain these teams have real
+                # matches in the training window and are fitted normally.
+                for team in unseen:
+                    model.register_promoted_team(
+                        team,
+                        method    = self.promoted_method,
+                        n_weakest = self.n_weakest,
+                    )
+                    promoted_seen.add(team)
+                promoted_matches += 1
 
             pred    = model.predict(home_team, away_team)
             outcome = self._get_result(row)
+
+            # Total-goals market, priced off the same scoreline matrix
+            p_over, p_under = model.predict_totals(
+                home_team, away_team, self.totals_line)
+            total_goals = row['FTHG'] + row['FTAG']
 
             # Probability array — must match outcome encoding
             # [P(away), P(draw), P(home)]
@@ -187,10 +234,21 @@ class Backtester:
                 'outcome'  : outcome,   # 2=H, 1=D, 0=A
                 'rps'      : round(rps, 4),
                 'log_loss' : round(ll,  4),
+                'p_over'   : round(p_over,  4),
+                'p_under'  : round(p_under, 4),
+                'total_goals'  : int(total_goals),
+                'over_actual'  : int(total_goals > self.totals_line),
                 'season'   : row.get('season', 'unknown')
             })
 
-        print(f"\nDone — {len(results)} matches predicted\n")
+        print(f"\nDone - {len(results)} matches predicted")
+        if self.handle_promoted:
+            print(f"  Promoted-team matches predicted via prior : "
+                  f"{promoted_matches} "
+                  f"({len(promoted_seen)} teams: {', '.join(sorted(promoted_seen)) or 'none'})")
+        else:
+            print(f"  Matches skipped (unseen team)             : {skipped_matches}")
+        print()
         return pd.DataFrame(results)
 
     def summary(self, results: pd.DataFrame) -> pd.DataFrame:

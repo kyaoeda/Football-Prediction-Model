@@ -1,0 +1,6 @@
+model,n,accuracy,rps,log_loss
+Market (closing),2660,0.5474,0.1967,0.9635
+Dixon-Coles,2660,0.5289,0.2034,0.9872
+Stacked + context,2660,0.5211,0.2063,1.0015
+Stacked (DC + xG/XGB),2660,0.5233,0.2065,1.0018
+XGBoost (xG form),2660,0.5075,0.2156,1.028

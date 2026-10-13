@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C \"C:/Users/kyaoe/OneDrive - Imperial College London/Documents/Predicative model/Football-Prediction-Model\" ls-files)",
+      "Bash(git -C \"C:/Users/kyaoe/OneDrive - Imperial College London/Documents/Predicative model/Football-Prediction-Model\" status --short)",
+      "Bash(PYTHONIOENCODING=cp932 MPLBACKEND=Agg python main.py)",
+      "Bash(MPLBACKEND=Agg python main.py)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(PYTHONUTF8=1 python -)",
+      "Bash(python -m pip install xgboost --quiet)",
+      "Bash(python -c \"import xgboost; print\\('xgboost', xgboost.__version__\\)\")",
+      "Bash(PYTHONUTF8=1 MPLBACKEND=Agg python main_xgb.py)",
+      "Bash(PYTHONUTF8=1 MPLBACKEND=Agg python main_stack.py)",
+      "Bash(sed -n '/STACKED MODEL/,$p' run_stack.log)",
+      "Bash(rm -f run_stack.log)"
+    ]
+  }
+}

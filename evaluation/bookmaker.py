@@ -18,30 +18,62 @@ class BookmakerComparison:
     """
     Compares model predictions against bookmaker odds.
 
-    Requires football-data.co.uk data which includes
-    Bet365 odds columns: B365H, B365D, B365A
+    Works with any bookmaker column set in football-data.co.uk data.
+    Select one via the ``bookmaker`` argument (see BOOKMAKERS below).
 
     Parameters
     ----------
     margin_method : str
         How to remove bookmaker margin:
-        'basic'  — divide by overround
-        'power'  — power method (more accurate)
+        'basic'  -- divide by overround
+        'power'  -- power method (more accurate)
+    bookmaker : str
+        Which odds columns to use. One of the keys in BOOKMAKERS:
+        'bet365'           -- Bet365 pre-match      (B365H/D/A)
+        'bet365_closing'   -- Bet365 closing        (B365CH/CD/CA)
+        'pinnacle'         -- Pinnacle opening      (PSH/D/A)
+        'pinnacle_closing' -- Pinnacle closing      (PSCH/CD/CA)
+        'market_avg'       -- market average        (AvgH/D/A)
+        'market_max'       -- best available price   (MaxH/D/A)
+        'market_avg_closing' -- market avg at close  (AvgCH/CD/CA)
+        'market_max_closing' -- best price at close  (MaxCH/CD/CA)
 
     Example
     -------
-    >>> bk = BookmakerComparison()
+    >>> bk = BookmakerComparison(bookmaker='pinnacle')
     >>> bk_probs = bk.extract_odds(raw_data)
     >>> merged   = bk.merge_with_results(results, bk_probs)
     >>> bk.full_report(merged)
     """
 
-    def __init__(self, margin_method: str = 'basic'):
+    # Odds column triples (home, draw, away) as named by football-data.co.uk.
+    BOOKMAKERS = {
+        'bet365':           ('B365H', 'B365D', 'B365A'),
+        'bet365_closing':   ('B365CH', 'B365CD', 'B365CA'),
+        'pinnacle':         ('PSH', 'PSD', 'PSA'),        # opening
+        'pinnacle_closing': ('PSCH', 'PSCD', 'PSCA'),
+        'market_avg':       ('AvgH', 'AvgD', 'AvgA'),
+        'market_max':       ('MaxH', 'MaxD', 'MaxA'),
+        # Closing equivalents (football-data provides these from 2019-20 on)
+        'market_avg_closing': ('AvgCH', 'AvgCD', 'AvgCA'),
+        'market_max_closing': ('MaxCH', 'MaxCD', 'MaxCA'),
+    }
+
+    def __init__(self, margin_method: str = 'basic', bookmaker: str = 'bet365'):
         self.margin_method = margin_method
+
+        if bookmaker not in self.BOOKMAKERS:
+            raise ValueError(
+                f"Unknown bookmaker '{bookmaker}'. "
+                f"Choose from: {', '.join(self.BOOKMAKERS)}"
+            )
+        self.bookmaker = bookmaker
+        self.col_h, self.col_d, self.col_a = self.BOOKMAKERS[bookmaker]
 
     # ── Odds Processing ───────────────────────────────────────────
 
-    def extract_odds(self, data: pd.DataFrame) -> pd.DataFrame:
+    def extract_odds(self, data: pd.DataFrame,
+                     reference: str | None = None) -> pd.DataFrame:
         """
         Extract and normalise bookmaker odds from raw data.
 
@@ -51,22 +83,68 @@ class BookmakerComparison:
         Parameters
         ----------
         data : pd.DataFrame
-            Raw football-data.co.uk data with B365H, B365D, B365A
+            Raw football-data.co.uk data containing the selected
+            bookmaker's odds columns (self.col_h/col_d/col_a).
+        reference : str | None
+            Optional second bookmaker (e.g. 'bet365_closing') whose odds
+            are carried alongside for Closing Line Value grading. Adds
+            columns close_odds_home/draw/away and bk_close_home/draw/away.
+            Rows missing the reference odds keep NaN in those columns.
 
         Returns
         -------
         pd.DataFrame with columns:
             date, home_team, away_team,
-            bk_home, bk_draw, bk_away,   ← normalised probabilities
-            overround                     ← bookmaker margin
+            bk_home, bk_draw, bk_away,     <- normalised probabilities
+            overround,                     <- bookmaker margin
+            odds_home, odds_draw, odds_away <- raw decimal odds to bet at
+            (+ close_odds_* and bk_close_* when reference is given)
         """
+        out = self._extract_one(data, self.col_h, self.col_d, self.col_a,
+                                self.bookmaker)
+
+        if reference is not None:
+            if reference not in self.BOOKMAKERS:
+                raise ValueError(
+                    f"Unknown reference bookmaker '{reference}'. "
+                    f"Choose from: {', '.join(self.BOOKMAKERS)}"
+                )
+            rh, rd, ra = self.BOOKMAKERS[reference]
+            close = self._extract_one(data, rh, rd, ra, reference)
+            close = close.rename(columns={
+                'bk_home'   : 'bk_close_home',
+                'bk_draw'   : 'bk_close_draw',
+                'bk_away'   : 'bk_close_away',
+                'odds_home' : 'close_odds_home',
+                'odds_draw' : 'close_odds_draw',
+                'odds_away' : 'close_odds_away',
+            }).drop(columns=['overround'])
+
+            out = out.merge(
+                close,
+                on  = ['date', 'home_team', 'away_team'],
+                how = 'left',   # keep every bettable match; NaN if no close
+            )
+
+        return out
+
+    def _extract_one(self, data: pd.DataFrame,
+                     h_col: str, d_col: str, a_col: str,
+                     label: str) -> pd.DataFrame:
+        """Devig one bookmaker's 1X2 odds into normalised probabilities."""
+        if not {h_col, d_col, a_col}.issubset(data.columns):
+            raise KeyError(
+                f"Data is missing odds columns for bookmaker "
+                f"'{label}': expected {h_col}, {d_col}, {a_col}"
+            )
+
         # Drop rows with missing odds
-        odds_data = data.dropna(subset=['B365H', 'B365D', 'B365A']).copy()
+        odds_data = data.dropna(subset=[h_col, d_col, a_col]).copy()
 
         # Raw implied probabilities (sum > 1 due to margin)
-        raw_home = 1 / odds_data['B365H']
-        raw_draw = 1 / odds_data['B365D']
-        raw_away = 1 / odds_data['B365A']
+        raw_home = 1 / odds_data[h_col]
+        raw_draw = 1 / odds_data[d_col]
+        raw_away = 1 / odds_data[a_col]
 
         # Overround = how much bookmaker takes
         # e.g. 1.05 = 5% margin
@@ -97,9 +175,9 @@ class BookmakerComparison:
             'bk_draw'   : np.round(bk_draw, 4),
             'bk_away'   : np.round(bk_away, 4),
             'overround' : np.round(overround, 4),
-            'B365H'     : odds_data['B365H'].values,
-            'B365D'     : odds_data['B365D'].values,
-            'B365A'     : odds_data['B365A'].values,
+            'odds_home' : odds_data[h_col].values,
+            'odds_draw' : odds_data[d_col].values,
+            'odds_away' : odds_data[a_col].values,
         })
 
     def _power_method(self, raw_home, raw_draw, raw_away):
@@ -170,7 +248,7 @@ class BookmakerComparison:
         )
 
         print(f"Merged {len(merged)} matches "
-              f"({len(results) - len(merged)} dropped — missing odds)")
+              f"({len(results) - len(merged)} dropped - missing odds)")
 
         return merged
 
@@ -333,23 +411,43 @@ class BookmakerComparison:
         print("=" * 55)
         print("        BOOKMAKER COMPARISON REPORT")
         print("=" * 55)
-        print(f"\n  Matches compared    : {len(merged)}")
+        print(f"\n  Bookmaker           : {self.bookmaker}")
+        print(f"  Matches compared    : {len(merged)}")
         print(f"  Mean overround      : {mean_overround:.3f} "
               f"({(mean_overround - 1) * 100:.1f}% margin)")
 
-        print(f"\n  ── RPS Comparison ──────────────────────────")
+        print(f"\n  -- RPS Comparison --------------------------")
         print(f"  Model RPS           : {model_rps:.4f}")
-        print(f"  Bookmaker RPS       : {bk_rps:.4f}")
+        print(f"  Bookmaker RPS       : {bk_rps:.4f}  ({self.bookmaker})")
         delta = bk_rps - model_rps
-        sign  = '✅ Model better' if delta > 0 else '❌ Bookmaker better'
+        sign  = '[model better]' if delta > 0 else '[bookmaker better]'
         print(f"  Difference          : {delta:+.4f}  {sign}")
 
-        print(f"\n  ── Closing Line Value ──────────────────────")
-        print(f"  Mean CLV            : {mean_clv:+.4f} "
-              f"({'positive ✅' if mean_clv > 0 else 'negative ❌'})")
-        print(f"  % predictions +CLV  : {pos_clv_pct:.1%}")
+        # If a closing reference is present, benchmark the model against the
+        # sharper closing line too — the toughest test of model quality.
+        if 'bk_close_home' in merged.columns:
+            has_close = merged['bk_close_home'].notna()
+            if has_close.any():
+                sub          = merged[has_close]
+                close_probs  = sub[['bk_close_away', 'bk_close_draw', 'bk_close_home']].values
+                model_sub    = sub[['away_win', 'draw', 'home_win']].values
+                out_sub      = sub['outcome'].values
+                close_rps    = self.rps(close_probs, out_sub)
+                model_rps_s  = self.rps(model_sub,   out_sub)
+                d_close      = close_rps - model_rps_s
+                sgn          = '[model better]' if d_close > 0 else '[closing better]'
+                print(f"  Closing-line RPS    : {close_rps:.4f}  "
+                      f"(n={int(has_close.sum())})")
+                print(f"  vs model            : {d_close:+.4f}  {sgn}")
 
-        print(f"\n  ── Disagreement ────────────────────────────")
+        print(f"\n  -- Model vs Market Edge --------------------")
+        print(f"  (model prob / {self.bookmaker} devig prob - 1; "
+              f"not true CLV)")
+        print(f"  Mean edge           : {mean_clv:+.4f} "
+              f"({'positive' if mean_clv > 0 else 'negative'})")
+        print(f"  % predictions +edge : {pos_clv_pct:.1%}")
+
+        print(f"\n  -- Disagreement ----------------------------")
         disagree = self.disagreement(merged, threshold=0.05)
         print(f"  Matches >5% diff    : {len(disagree)} "
               f"({len(disagree)/len(merged):.1%})")
@@ -365,7 +463,7 @@ class BookmakerComparison:
 
             print(f"  Model RPS (disagree): {disagree_model_rps:.4f}")
             print(f"  Bookie RPS (disagree): {disagree_bk_rps:.4f}")
-            sign = '✅' if disagree_model_rps < disagree_bk_rps else '❌'
+            sign = '[yes]' if disagree_model_rps < disagree_bk_rps else '[no]'
             print(f"  Model wins on disagreements: {sign}")
 
         print("=" * 55)

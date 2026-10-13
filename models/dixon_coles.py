@@ -4,7 +4,12 @@ import warnings
 from scipy.optimize import minimize
 from scipy.special import gammaln
 from dataclasses import dataclass
-from config import DIXON_COLES_XI, DIXON_COLES_MAX_GOALS
+from config import (
+    DIXON_COLES_XI,
+    DIXON_COLES_MAX_GOALS,
+    PROMOTED_RATING_METHOD,
+    PROMOTED_N_WEAKEST,
+)
 
 
 @dataclass
@@ -60,6 +65,7 @@ class DixonColesModel:
         self.fitted_ = False
         self.result_ = None
         self._last_theta_ = None
+        self._fitted_teams_ = None   # teams that came from actual data (not priors)
 
     # ── Validation helpers ───────────────────────────────────────
 
@@ -292,6 +298,7 @@ class DixonColesModel:
         self.result_ = result
         self._last_theta_ = result.x.copy()
         self.params_ = self._pack_params_dict(result.x)
+        self._fitted_teams_ = set(self.teams_)
         self.fitted_ = True
         return self
 
@@ -317,7 +324,16 @@ class DixonColesModel:
         mu = np.clip(mu, 1e-8, 15.0)
         return lam, mu
 
-    def predict(self, home_team: str, away_team: str) -> MatchPrediction:
+    def score_matrix(self, home_team: str, away_team: str):
+        """
+        Normalised scoreline probability matrix for one fixture.
+
+        matrix[i, j] = P(home scores i, away scores j), for goals
+        0..max_goals. Every derived market (1X2, totals, correct score,
+        handicaps) is a sum over cells of this matrix.
+
+        Returns (matrix, lam, mu).
+        """
         self._check_fitted()
         self._check_teams(home_team, away_team)
 
@@ -338,6 +354,35 @@ class DixonColesModel:
 
         matrix = np.clip(matrix, 0.0, None)
         matrix /= matrix.sum()
+        return matrix, lam, mu
+
+    def predict_totals(self, home_team: str, away_team: str,
+                       line: float = 2.5) -> tuple[float, float]:
+        """
+        Price the Over/Under total-goals market.
+
+        Sums the scoreline matrix on either side of `line`. Use a .5
+        line (2.5, 3.5, ...) so no scoreline can push.
+
+        Returns (p_over, p_under).
+        """
+        if float(line) == int(line):
+            raise ValueError(
+                f"line={line} allows a push; use a .5 line such as 2.5"
+            )
+
+        matrix, _, _ = self.score_matrix(home_team, away_team)
+
+        # totals[i, j] = i + j
+        goals = np.arange(self.max_goals + 1)
+        totals = goals[:, None] + goals[None, :]
+
+        p_over = float(matrix[totals > line].sum())
+        p_under = float(matrix[totals < line].sum())
+        return p_over, p_under
+
+    def predict(self, home_team: str, away_team: str) -> MatchPrediction:
+        matrix, lam, mu = self.score_matrix(home_team, away_team)
 
         return MatchPrediction(
             home_win=float(np.tril(matrix, -1).sum()),
@@ -405,6 +450,81 @@ class DixonColesModel:
             "attack": [self.params_["attack"][t] for t in self.teams_],
             "defence": [self.params_["defence"][t] for t in self.teams_],
         }).sort_values("attack", ascending=False).reset_index(drop=True)
+
+    # ── Promoted / unseen teams ───────────────────────────────────
+
+    def promoted_prior(
+        self,
+        method: str = PROMOTED_RATING_METHOD,
+        n_weakest: int = PROMOTED_N_WEAKEST,
+    ) -> tuple[float, float]:
+        """
+        Derive a prior (attack, defence) rating for a team with no history.
+
+        Promoted teams typically perform around the level of the division's
+        weakest sides, so the default seeds them from the N lowest-rated
+        fitted teams. Only teams that came from actual data are used as the
+        reference set, so priors don't compound if several promoted teams are
+        registered before the next retrain.
+
+        Recall (see _neg_log_likelihood):
+            lam = exp(attack_home - defence_away + home_adv)
+        so a *low* attack means scores fewer, and a *low* defence means
+        concedes more — both appropriate for a weaker promoted side.
+        """
+        self._check_fitted()
+
+        reference = self._fitted_teams_ or set(self.teams_)
+        fitted = [t for t in self.teams_ if t in reference]
+        attacks = np.array([self.params_["attack"][t] for t in fitted], dtype=float)
+        defences = np.array([self.params_["defence"][t] for t in fitted], dtype=float)
+
+        if method == "weakest":
+            k = max(1, min(n_weakest, len(fitted)))
+            attack = float(np.sort(attacks)[:k].mean())
+            defence = float(np.sort(defences)[:k].mean())
+        elif method == "average":
+            attack = float(attacks.mean())
+            defence = float(defences.mean())
+        elif method == "percentile":
+            attack = float(np.percentile(attacks, 25))
+            defence = float(np.percentile(defences, 25))
+        else:
+            raise ValueError(
+                f"Unknown promoted rating method: '{method}'. "
+                f"Use 'weakest', 'average' or 'percentile'."
+            )
+
+        return attack, defence
+
+    def register_team(self, team: str, attack: float, defence: float) -> None:
+        """
+        Inject a team that was absent from the training data, giving it the
+        supplied attack/defence ratings so its matches can be predicted.
+
+        The sum-to-zero attack constraint is only needed while fitting, so
+        adding a raw rating here is safe for prediction: predict() and the
+        expected-goal helpers read attack/defence straight out of params_.
+        """
+        self._check_fitted()
+        if team in self.team_to_idx_:
+            return
+
+        self.teams_.append(team)
+        self.team_to_idx_[team] = len(self.teams_) - 1
+        self.params_["attack"][team] = float(attack)
+        self.params_["defence"][team] = float(defence)
+
+    def register_promoted_team(
+        self,
+        team: str,
+        method: str = PROMOTED_RATING_METHOD,
+        n_weakest: int = PROMOTED_N_WEAKEST,
+    ) -> tuple[float, float]:
+        """Convenience: compute a prior rating and register the team with it."""
+        attack, defence = self.promoted_prior(method=method, n_weakest=n_weakest)
+        self.register_team(team, attack, defence)
+        return attack, defence
 
     def __repr__(self):
         status = "fitted" if self.fitted_ else "not fitted"

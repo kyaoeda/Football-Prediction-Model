@@ -62,7 +62,7 @@ class BettingStrategy:
 
     # ── Private Helpers ───────────────────────────────────────────
 
-    def _kelly_stake(self, edge: float,
+    def _kelly_stake(self, model_prob: float,
                      odds: float,
                      bank: float,
                      fraction: float = 0.25) -> float:
@@ -74,27 +74,27 @@ class BettingStrategy:
         which is much safer.
 
         Formula:
-            f = (bp - q) / b
+            f = (b*p - q) / b
             where:
                 b = decimal odds - 1
-                p = model probability
+                p = model probability   (our estimate of P(win))
                 q = 1 - p
 
         Parameters
         ----------
-        edge     : model_prob - bookmaker_prob
-        odds     : decimal odds
-        bank     : current bankroll
-        fraction : Kelly fraction (0.25 = quarter Kelly)
+        model_prob : our probability for this outcome (P(win))
+        odds       : decimal odds we would take
+        bank       : current bankroll
+        fraction   : Kelly fraction (0.25 = quarter Kelly)
         """
         b = odds - 1
-        p = (1 / odds) + edge    # model probability
+        p = model_prob
         q = 1 - p
 
         kelly = (b * p - q) / b
 
         # Never bet more than 5% of bank on one bet
-        kelly = max(0, min(kelly, 0.05))
+        kelly = max(0.0, min(kelly, 0.05))
 
         return round(bank * kelly * fraction, 2)
 
@@ -113,10 +113,11 @@ class BettingStrategy:
 
     def _get_stake(self, edge: float,
                    odds: float,
-                   bank: float) -> float:
+                   bank: float,
+                   model_prob: float) -> float:
         """Return stake based on chosen staking method."""
         if   self.method == 'flat' : return self.stake
-        elif self.method == 'kelly': return self._kelly_stake(edge, odds, bank)
+        elif self.method == 'kelly': return self._kelly_stake(model_prob, odds, bank)
         elif self.method == 'edge' : return self._edge_stake(edge, self.stake)
         else                       : return self.stake
 
@@ -162,10 +163,18 @@ class BettingStrategy:
 
             # ── Check each outcome for value ──────────────────────
             outcomes = [
-                ('home', row['home_win'], row['bk_home'], row['B365H']),
-                ('draw', row['draw'],     row['bk_draw'], row['B365D']),
-                ('away', row['away_win'], row['bk_away'], row['B365A']),
+                ('home', row['home_win'], row['bk_home'], row['odds_home']),
+                ('draw', row['draw'],     row['bk_draw'], row['odds_draw']),
+                ('away', row['away_win'], row['bk_away'], row['odds_away']),
             ]
+
+            # Closing odds per outcome (present only if a closing reference
+            # was supplied to extract_odds); used for true CLV grading.
+            close_odds = {
+                'home': row.get('close_odds_home', np.nan),
+                'draw': row.get('close_odds_draw', np.nan),
+                'away': row.get('close_odds_away', np.nan),
+            }
 
             for bet_on, model_prob, bk_prob, odds in outcomes:
 
@@ -185,7 +194,7 @@ class BettingStrategy:
                     continue
 
                 # Calculate stake
-                stake = self._get_stake(edge, odds, bank)
+                stake = self._get_stake(edge, odds, bank, model_prob)
 
                 # Skip if stake would exceed bank
                 if stake > bank:
@@ -197,6 +206,16 @@ class BettingStrategy:
                 profit     = round((odds - 1) * stake if won else -stake, 2)
                 bank       = round(bank + profit, 2)
 
+                # True Closing Line Value: did the price we took (opening)
+                # beat the closing line? clv > 0 means we got better odds
+                # than the market's sharpest estimate — the real edge signal.
+                c_odds = close_odds[bet_on]
+                if pd.notna(c_odds) and c_odds > 0:
+                    clv        = round(odds / c_odds - 1, 4)
+                    beat_close = bool(odds > c_odds)
+                else:
+                    clv, beat_close = np.nan, None
+
                 bets.append({
                     'date'      : row['date'],
                     'home_team' : row['home_team'],
@@ -205,7 +224,10 @@ class BettingStrategy:
                     'model_prob': round(model_prob, 4),
                     'bk_prob'   : round(bk_prob,    4),
                     'odds'      : round(odds,        2),
+                    'close_odds': round(c_odds, 2) if pd.notna(c_odds) else np.nan,
                     'edge'      : round(edge,        4),
+                    'clv'       : clv,
+                    'beat_close': beat_close,
                     'stake'     : stake,
                     'outcome'   : actual,
                     'won'       : won,
@@ -255,31 +277,40 @@ class BettingStrategy:
         print("=" * 55)
         print(f"\n  Staking method    : {self.method}")
         print(f"  Min edge required : {self.min_edge:.0%}")
-        print(f"  Starting bank     : £{self.bank:,.2f}")
-        print(f"  Final bank        : £{final_bank:,.2f}")
+        print(f"  Starting bank     : GBP {self.bank:,.2f}")
+        print(f"  Final bank        : GBP {final_bank:,.2f}")
 
-        print(f"\n  ── Volume ──────────────────────────────────")
+        print(f"\n  -- Volume ----------------------------------")
         print(f"  Total bets        : {total_bets}")
-        print(f"  Total staked      : £{total_staked:,.2f}")
+        print(f"  Total staked      : GBP {total_staked:,.2f}")
 
         # Breakdown by outcome type
         for outcome in ['home', 'draw', 'away']:
             n = (bets['bet_on'] == outcome).sum()
             print(f"  Bets on {outcome:<5}    : {n}")
 
-        print(f"\n  ── Performance ─────────────────────────────")
+        print(f"\n  -- Performance -----------------------------")
         print(f"  Win rate          : {win_rate:.1%}")
-        print(f"  Total profit      : £{total_profit:+,.2f}")
+        print(f"  Total profit      : GBP {total_profit:+,.2f}")
         print(f"  ROI               : {roi:+.2%}")
         print(f"  Bank growth       : {bank_growth:+.2%}")
 
-        print(f"\n  ── Risk ────────────────────────────────────")
+        # ── Closing Line Value (real edge signal) ──────────────────
+        if 'clv' in bets.columns:
+            clv_series = bets['clv'].dropna()
+            if len(clv_series):
+                print(f"\n  -- Closing Line Value ----------------------")
+                print(f"  Bets graded vs close: {len(clv_series)} of {total_bets}")
+                print(f"  Mean CLV            : {clv_series.mean():+.2%}")
+                print(f"  % beating close     : {(clv_series > 0).mean():.1%}")
+
+        print(f"\n  -- Risk ------------------------------------")
         print(f"  Max drawdown      : {max_drawdown:.2%}")
         print(f"  Longest loss run  : {max_streak} bets")
 
         # Per season breakdown
         if 'season' in bets.columns:
-            print(f"\n  ── Per Season ──────────────────────────────")
+            print(f"\n  -- Per Season ------------------------------")
             season_summary = (
                 bets.groupby('season')
                 .agg(
@@ -373,7 +404,8 @@ class BettingStrategy:
 
         edge_roi = (
             bets.groupby('edge_bucket', observed=True)
-            .apply(lambda x: x['profit'].sum() / x['stake'].sum())
+            .apply(lambda x: x['profit'].sum() / x['stake'].sum(),
+                   include_groups=False)
             .reset_index()
         )
         edge_roi.columns = ['edge_bucket', 'roi']
