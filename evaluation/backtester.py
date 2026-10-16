@@ -61,7 +61,8 @@ class Backtester:
                  handle_promoted : bool  = True,
                  promoted_method : str   = PROMOTED_RATING_METHOD,
                  n_weakest       : int   = PROMOTED_N_WEAKEST,
-                 totals_line     : float = 2.5):
+                 totals_line     : float = 2.5,
+                 xg_weight       : float = 0.0):
 
         self.xi              = xi
         self.min_train       = min_train
@@ -70,6 +71,7 @@ class Backtester:
         self.promoted_method = promoted_method
         self.n_weakest       = n_weakest
         self.totals_line     = totals_line
+        self.xg_weight       = float(xg_weight)
 
     # ── Private Helpers ───────────────────────────────────────────
 
@@ -157,7 +159,8 @@ class Backtester:
                 train_data = data.iloc[:i]
                 model      = DixonColesModel(
                     xi        = self.xi,
-                    max_goals = DIXON_COLES_MAX_GOALS
+                    max_goals = DIXON_COLES_MAX_GOALS,
+                    xg_weight = self.xg_weight,
                 )
                 model.fit(train_data)
                 last_trained = i

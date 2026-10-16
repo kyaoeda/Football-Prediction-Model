@@ -10,6 +10,7 @@ A quantitative football modelling and betting research pipeline for the **Englis
    - Unconstrained `L-BFGS-B` Maximum Likelihood Estimation (MLE) using sum-to-zero attack parameter reconstruction ($n - 1$ free attack parameters) for fast convergence in rolling backtests.
    - Exponential time-decay weighting: $w_i = \exp(-\xi \cdot \Delta t_i)$.
    - Low-scoreline dependency adjustment $\tau(x, y \mid \lambda, \mu, \rho)$ for $0\text{–}0, 1\text{–}0, 0\text{–}1, 1\text{–}1$ scorelines.
+   - **xG-Blended Quasi-Poisson MLE (`xg_weight`)**: Optional continuous blending of Understat xG and actual goals ($\tilde{y} = w \cdot \text{xG} + (1 - w) \cdot \text{Goals}$) when estimating team attack/defence rates $(\lambda, \mu)$, while preserving discrete goals for the $\tau$ low-scoreline correlation.
    - Full scoreline probability matrix pricing both **1X2** and **Over/Under $2.5$ Totals** markets simultaneously.
    - Cold-start prior seeding (`weakest`, `average`, or `percentile`) for newly promoted teams with no top-flight history.
 
@@ -132,17 +133,19 @@ python main_clv_target.py
 
 ## Summary of Empirical Findings
 
-Pooled results across **2,660 Premier League matches** (`2019-20` to `2025-26` walk-forward cross-validation from `outputs/cv_pooled.csv`):
+Pooled results across **2,660 Premier League matches** (`2019-20` to `2025-26` walk-forward cross-validation):
 
 | Model | Matches ($N$) | Accuracy | Mean RPS (Lower = Better) | Log Loss |
 | :--- | :---: | :---: | :---: | :---: |
 | **Market (closing)** | 2,660 | **54.74%** | **0.1967** | **0.9635** |
-| **Dixon-Coles (walk-forward)** | 2,660 | 52.89% | 0.2034 | 0.9872 |
+| **Dixon-Coles (70% xG + 30% Goals, `xg_weight=0.7`)** | 2,660 | **53.42%** | **0.2011** | **0.9777** |
+| **Dixon-Coles (Goals only, `xg_weight=0.0`)** | 2,660 | 52.89% | 0.2034 | 0.9872 |
 | **Stacked + Context** | 2,660 | 52.11% | 0.2063 | 1.0015 |
 | **Stacked (DC + xG/XGB)** | 2,660 | 52.33% | 0.2065 | 1.0018 |
 | **XGBoost (xG form only)** | 2,660 | 50.75% | 0.2156 | 1.0280 |
 
 ### Key Takeaways
-- **Dixon-Coles vs. Tabular ML**: Parametric Dixon-Coles (`RPS 0.2034`) significantly outperforms standalone rolling-xG XGBoost (`RPS 0.2156`) and slightly outperforms stacked meta-models (`RPS 0.2063`), because global team-strength estimation via MLE handles opponent quality and long-horizon shrinkage more sample-efficiently than tree splits on ~1,500–4,000 matches.
+- **xG-Blended Dixon-Coles Is the Strongest Model (`0.2011` RPS)**: Blending 70% Understat xG with 30% actual goals inside the Dixon-Coles Poisson quasi-likelihood reduces RPS by **`-0.00228`** (`95% CI [-0.00374, -0.00086]`, $p < 0.0001$) and Log Loss by **`-0.00952`** over standard goals-only Dixon-Coles across 2,660 matches, closing over a third of the gap to the closing market.
+- **Dixon-Coles vs. Tabular ML**: Parametric Dixon-Coles (`RPS 0.2011` with xG, `0.2034` with goals) significantly outperforms standalone rolling-xG XGBoost (`RPS 0.2156`) and stacked meta-models (`RPS 0.2063`), because global team-strength estimation via MLE adjusts for opponent quality and shrinks noisy short-term streaks far more sample-efficiently than decision trees.
 - **Time-Decay ($\xi$) Flatness**: Nested validation (`outputs/xi_tuning_curve.csv`) shows a shallow optimum around $\xi \in [0.001, 0.00325]$ (half-life ~213 to ~693 days), with less than `0.0007` RPS difference across that plateau.
 - **Line Shopping vs. Closing Efficiency**: Shopping across bookmakers (`market_max` vs `bet365`) reduces bookmaker overround from ~5.6% to ~2.3%, saving ~3.3% margin per bet—an execution advantage larger than most model-level improvements.

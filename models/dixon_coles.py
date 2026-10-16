@@ -56,9 +56,17 @@ class DixonColesModel:
     - warm-start friendly
     """
 
-    def __init__(self, xi: float = DIXON_COLES_XI, max_goals: int = DIXON_COLES_MAX_GOALS):
+    def __init__(
+        self,
+        xi: float = DIXON_COLES_XI,
+        max_goals: int = DIXON_COLES_MAX_GOALS,
+        xg_weight: float = 0.0,
+    ):
+        if not (0.0 <= xg_weight <= 1.0):
+            raise ValueError(f"xg_weight must be in [0, 1], got {xg_weight}")
         self.xi = xi
         self.max_goals = max_goals
+        self.xg_weight = float(xg_weight)
         self.params_ = None
         self.teams_ = None
         self.team_to_idx_ = None
@@ -128,7 +136,18 @@ class DixonColesModel:
         away_idx = data["AwayTeam"].map(self.team_to_idx_).to_numpy(dtype=int)
         hg = data["FTHG"].to_numpy(dtype=int)
         ag = data["FTAG"].to_numpy(dtype=int)
-        return home_idx, away_idx, hg, ag
+
+        hg_target = hg.astype(float)
+        ag_target = ag.astype(float)
+        if self.xg_weight > 0.0 and {"xg_home", "xg_away"}.issubset(data.columns):
+            xgh = data["xg_home"].to_numpy(dtype=float)
+            xga = data["xg_away"].to_numpy(dtype=float)
+            valid = np.isfinite(xgh) & np.isfinite(xga)
+            w = self.xg_weight
+            hg_target = np.where(valid, w * xgh + (1.0 - w) * hg_target, hg_target)
+            ag_target = np.where(valid, w * xga + (1.0 - w) * ag_target, ag_target)
+
+        return home_idx, away_idx, hg, ag, hg_target, ag_target
 
     # ── Parameter handling ────────────────────────────────────────
 
@@ -219,6 +238,8 @@ class DixonColesModel:
         away_idx: np.ndarray,
         hg: np.ndarray,
         ag: np.ndarray,
+        hg_target: np.ndarray,
+        ag_target: np.ndarray,
         weights: np.ndarray,
         ridge: float = 0.0,
     ) -> float:
@@ -237,11 +258,11 @@ class DixonColesModel:
         log_p = (
             np.log(tau)
             - lam
-            + hg * np.log(lam)
-            - self._log_factorial(hg)
+            + hg_target * np.log(lam)
+            - self._log_factorial(hg_target)
             - mu
-            + ag * np.log(mu)
-            - self._log_factorial(ag)
+            + ag_target * np.log(mu)
+            - self._log_factorial(ag_target)
         )
 
         if not np.isfinite(log_p).all():
@@ -272,7 +293,7 @@ class DixonColesModel:
         data = data.reset_index(drop=True)
         self._build_teams(data)
 
-        home_idx, away_idx, hg, ag = self._encode_matches(data)
+        home_idx, away_idx, hg, ag, hg_target, ag_target = self._encode_matches(data)
         weights = self._time_weights(data["Date"])
         weights = weights / weights.sum() * len(weights)
 
@@ -286,10 +307,10 @@ class DixonColesModel:
         result = minimize(
             fun=self._neg_log_likelihood,
             x0=theta0,
-            args=(home_idx, away_idx, hg, ag, weights, ridge),
+            args=(home_idx, away_idx, hg, ag, hg_target, ag_target, weights, ridge),
             method="L-BFGS-B",
             bounds=bounds,
-            options={"maxiter": maxiter},
+            options={"maxiter": maxiter, "maxfun": 50000},
         )
 
         if not result.success:
